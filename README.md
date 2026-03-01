@@ -1,5 +1,4 @@
 # highnote
-ML models for highnote dataset 
 
 This repository contains a comprehensive machine learning workflow (R Markdown) designed to identify high-value users for HighNote, a digital music service. The primary objective is to predict which "free" users are most likely to convert to "premium" subscribers.
 
