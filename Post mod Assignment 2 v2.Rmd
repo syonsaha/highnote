@@ -1,0 +1,660 @@
+---
+title: "ML PostModAssignment2"
+author: "Syon Saha"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+## Data Prep
+```{r, warning=FALSE, include=FALSE}
+library("readxl") # used to read excel files
+library("dplyr") # used for data munging 
+library("FNN") # used for knn regression (knn.reg function)
+library("caret") # used for various predictive models
+library("class") # for using confusion matrix function
+library("rpart.plot") # used to plot decision tree
+library("rpart")  # used for Regression tree
+library("glmnet") # used for Lasso and Ridge regression
+library('NeuralNetTools') # used to plot Neural Networks
+library("PRROC") # top plot ROC curve
+library("ROCR") # top plot lift curve
+library("tidyverse")
+library("xgboost")
+library("skimr")
+
+```
+
+Step 1: Loading the dataset
+```{r, warning=FALSE}
+highnote_df <- read_csv("HN_data_PostModule.csv")
+
+# skim(highnote_df)
+```
+
+Step 2: Create x an y data set 
+```{r}
+highnote_y <- highnote_df %>% pull(adopter)
+#skim(highnote_y)
+
+highnote_x <- highnote_df %>% select(-adopter, -net_user)
+#skim(highnote_x)
+```
+
+Step 3: Normalize function and normalizing x variables 
+```{r}
+normalize <- function(x) {
+  return ((x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)))
+}
+
+highnote_x_normalized <- as.data.frame(lapply(highnote_x, normalize)) # Normalize x variables, they are at different scale
+#skim(highnote_x_normalized)
+```
+
+Step 4: Create training and test data sets 
+```{r}
+smp_size <- floor(0.75 * nrow(highnote_x_normalized))
+set.seed(12345)
+
+train_indices <- sample(seq_len(nrow(highnote_x_normalized)), size = smp_size)
+
+# Create the training set for X by selecting only the rows from train_indices
+x_train <- highnote_x_normalized[train_indices, ]
+# Create the testing set for X by selecting all rows EXCEPT those in train_indices
+x_test <- highnote_x_normalized[-train_indices, ]
+
+# Create the training set for y by selecting the corresponding elements from the vector
+y_train <- highnote_y[train_indices]
+# Create the testing set for y
+y_test <- highnote_y[-train_indices]
+```
+
+Step 5: Manually impute the data 
+```{r}
+# Manually impute the data first to avoid data leakage, also imputing doesn't work when you ALSO SMOTE (?) 
+impute_model <- preProcess(x_train, method = "medianImpute")
+
+x_train_imputed <- predict(impute_model, x_train)
+# Impute test data using the same model
+x_test_imputed <- predict(impute_model, x_test)
+
+# IMPORTANT: For classification, caret works best when the outcome is a 'factor'
+y_train <- as.factor(y_train)
+
+#skim(x_train_imputed)
+```
+
+Step 6: Create DF to store results 
+```{r}
+# Create an empty data frame to store results from different models
+clf_results <- data.frame(matrix(ncol = 5, nrow = 0))
+names(clf_results) <- c("Model", "Accuracy", "Precision", "Recall", "F1")
+
+# Create an empty data frame to store TP, TN, FP and FN values
+cost_benefit_df <- data.frame(matrix(ncol = 5, nrow = 0))
+names(cost_benefit_df) <- c("Model", "TP", "FN", "FP", "TN")
+```
+
+
+## Logistic Regression
+
+Step 1: (Question 2a) Building a model using only the previous time period’s change variables
+```{r}
+# Data for Model A (Change Variables Only)
+
+# Identify the names of your "change" columns 
+change_variable_names <- c("delta1_friend_cnt", "delta1_avg_friend_age", "delta1_avg_friend_male",
+                           "delta1_friend_country_cnt", "delta1_subscriber_friend_cnt",
+                           "delta1_songsListened", "delta1_lovedTracks", "delta1_posts",
+                           "delta1_playlists", "delta1_shouts", "delta1_good_country")
+
+# Create the new data frames for Model A that contain ONLY these columns
+x_train_model_A <- x_train_imputed %>% select(all_of(change_variable_names))
+x_test_model_A  <- x_test  %>% select(all_of(change_variable_names))
+```
+
+Step 2: Regression using Model A
+```{r, warning=FALSE, cache=TRUE}
+smote_control <- trainControl(
+    method = "cv", 
+    number = 10,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    sampling = "smote" # SMOTE
+)
+
+y_train_factor <- as.factor(y_train)
+levels(y_train_factor) <- make.names(levels(y_train_factor))
+
+y_test_factor <- as.factor(y_test)
+levels(y_test_factor) <- make.names(levels(y_test_factor))
+
+model_A_smote <- train(
+    x = x_train_model_A,
+    y = y_train_factor,
+    method = "glm",
+    family = "binomial",
+    trControl = smote_control,
+    metric = "ROC" # Optimize for a better metric than accuracy
+)
+
+predictions_A_smote <- predict(model_A_smote, newdata = x_test_model_A)
+
+# Create and print the confusion matrix
+confusionMatrix_A_smote <- confusionMatrix(predictions_A_smote, y_test_factor, positive = "X1")
+
+print(confusionMatrix_A_smote)
+
+# Add results to clf_results df
+overall_metrics_A <- confusionMatrix_A_smote[["overall"]]
+class_metrics_A   <- confusionMatrix_A_smote[["byClass"]]
+conf_table_A      <- confusionMatrix_A_smote[["table"]]
+
+# Add a new row to the clf_results dataframe
+clf_results[nrow(clf_results) + 1,] <- list(
+    Model = "LogReg Model A",
+    Accuracy = round(overall_metrics_A[["Accuracy"]], 3),
+    Precision = round(class_metrics_A[["Precision"]], 3),
+    Recall = round(class_metrics_A[["Recall"]], 3),
+    F1 = round(class_metrics_A[["F1"]], 3)
+)
+
+# Add a new row to the cost_benefit_df dataframe
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <- list(
+    Model = "LogReg Model A",
+    TP = conf_table_A[2, 2], # True Positives
+    FN = conf_table_A[1, 2], # False Negatives
+    FP = conf_table_A[2, 1], # False Positives
+    TN = conf_table_A[1, 1]  # True Negatives
+)
+```
+
+Step 3: (Question 2b) Regression using Model B
+```{r, warning=FALSE, cache=TRUE}
+smote_control <- trainControl(
+    method = "cv", 
+    number = 10,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    sampling = "smote" 
+)
+
+model_B_smote <- train(
+    x = x_train_imputed, 
+    y = y_train_factor,
+    method = "glm",
+    family = "binomial",
+    trControl = smote_control,
+    metric = "ROC" 
+)
+
+predictions_B_smote <- predict(model_B_smote, newdata = x_test_imputed)
+
+confusionMatrix_B <- confusionMatrix(predictions_B_smote, y_test_factor, positive = "X1")
+
+print(confusionMatrix_B)
+
+# Create and print the confusion matrix
+overall_metrics_B <- confusionMatrix_B[["overall"]]
+class_metrics_B   <- confusionMatrix_B[["byClass"]]
+conf_table_B      <- confusionMatrix_B[["table"]]
+
+# Add a new row to the clf_results dataframe
+clf_results[nrow(clf_results) + 1,] <- list(
+    Model = "LogReg Model B",
+    Accuracy = round(overall_metrics_B[["Accuracy"]], 3),
+    Precision = round(class_metrics_B[["Precision"]], 3),
+    Recall = round(class_metrics_B[["Recall"]], 3),
+    F1 = round(class_metrics_B[["F1"]], 3)
+)
+
+# Add a new row to the cost_benefit_df dataframe
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <- list(
+    Model = "LogReg Model B",
+    TP = conf_table_B[2, 2], # True Positives
+    FN = conf_table_B[1, 2], # False Negatives
+    FP = conf_table_B[2, 1], # False Positives
+    TN = conf_table_B[1, 1]  # True Negatives
+)
+```
+# It is intuitive that by adding MORE variables and current period variables will yield better results; as a result, moving further I will only be running models on all/current period variables as it will save time when I run the following models #
+
+## KNN
+Step 1: Running the KNN model 
+```{r message=FALSE, cache=TRUE}
+cross_validation <- trainControl(## 10-fold CV
+                                 method = "repeatedcv",
+                                 number = 10,
+                                 repeats = 1,
+                                 sampling = "smote")
+
+Param_Grid <- expand.grid(k = seq(from = 3, to = 15, by = 2))
+
+# Measure training time
+start_time_knn <- Sys.time()
+
+knn_clf_fit <- train(x_train_imputed,
+                     y_train_factor, 
+                     method = "knn",
+                     #preProcess = "medianImpute",
+                     tuneGrid = Param_Grid,
+                     trControl = cross_validation )
+
+end_time_knn <- Sys.time()
+
+elapsed_time_knn <- end_time_knn - start_time_knn
+print(paste("Total training time:", round(elapsed_time_knn, 2)))
+
+knn_clf_fit
+```
+
+Step 2: How many neighbors is best 
+```{r}
+# Plot accuracies for different k values
+plot(knn_clf_fit) 
+
+# print the best model
+print(knn_clf_fit$finalModel)
+
+#Best model is 3 nearest neighbor
+```
+
+Step 3: Confusion Matrix 
+```{r}
+# Predict on test data
+knnPredict <- predict(knn_clf_fit, newdata = x_test_imputed) 
+
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(knnPredict, y_test_factor, positive = "X1")
+
+
+# Save results in to clf_results
+cm_knn <- confusionMatrix(knnPredict, y_test_factor, positive = "X1")
+
+overall_metrics <- cm_knn[["overall"]]
+class_metrics <- cm_knn[["byClass"]]
+conf_table <- cm_knn[["table"]]
+
+clf_results[nrow(clf_results) + 1,] <- list(
+    Model = "KNN",
+    Accuracy = round(overall_metrics[["Accuracy"]], 3),
+    Precision = round(class_metrics[["Precision"]], 3),
+    Recall = round(class_metrics[["Recall"]], 3),
+    F1 = round(class_metrics[["F1"]], 3)
+)
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <- list(
+    Model = "KNN",
+    TP = conf_table[2, 2], # True Positives
+    FN = conf_table[1, 2], # False Negatives
+    FP = conf_table[2, 1], # False Positives
+    TN = conf_table[1, 1]  # True Negatives
+)
+```
+
+
+## Decision Tree
+Step 1: Decision Tree Model
+```{r message=FALSE, cache=TRUE}
+cross_validation_dt <- trainControl(
+                                    method = "repeatedcv",
+                                    number = 10,
+                                    repeats = 3,
+                                    classProbs = TRUE, # Required for SMOTE
+                                    summaryFunction = twoClassSummary, 
+                                    sampling = "smote" # This is the key line to add SMOTE
+                                )
+
+param_grid <- expand.grid(maxdepth = 2:10)
+
+# Measure training time
+start_time_dt <- Sys.time()
+
+dtree_fit <- train(x_train_imputed,
+                   y_train_factor, 
+                   method = "rpart2",
+                   # split - criteria to split nodes
+                   parms = list(split = "gini"),
+                   tuneGrid = param_grid,
+                   trControl = cross_validation_dt,
+                   metric = "ROC",
+                   preProc = c("center", "scale"))
+
+end_time_dt <- Sys.time()
+
+elapsed_time_dt <- end_time_dt - start_time_dt
+print(paste("Total training time:", round(elapsed_time_dt, 2)))
+
+# check the accuracy for different models
+dtree_fit
+```
+
+Step 2
+```{r}
+# print the final model
+dtree_fit$finalModel
+```
+
+Step 3: Plot the tree
+```{r}
+# Plot decision tree
+prp(dtree_fit$finalModel, box.palette = "Reds", tweak = 1.2)
+```
+
+Step 4: Decision Tree Confusion Matrix 
+```{r}
+# Predict on test data
+dtree_predict <- predict(dtree_fit, newdata = x_test_imputed)
+
+y_test_factor <- as.factor(y_test)
+levels(y_test_factor) <- make.names(levels(y_test_factor)) # <-- This is the one-line fix!
+
+conf_matrix_dt <- confusionMatrix(
+  data = dtree_predict,
+  reference = y_test_factor,
+  positive = "X1"
+)
+
+print(conf_matrix_dt)
+
+# Save results 
+overall_metrics_dt <- conf_matrix_dt[["overall"]]
+class_metrics_dt   <- conf_matrix_dt[["byClass"]]
+conf_table_dt      <- conf_matrix_dt[["table"]]
+
+# Add a new row to the clf_results dataframe
+clf_results[nrow(clf_results) + 1,] <- list(
+    Model = "Decision Tree",
+    Accuracy = round(overall_metrics_dt[["Accuracy"]], 3),
+    Precision = round(class_metrics_dt[["Precision"]], 3),
+    Recall = round(class_metrics_dt[["Recall"]], 3),
+    F1 = round(class_metrics_dt[["F1"]], 3)
+)
+
+# Add a new row to the cost_benefit_df dataframe
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <- list(
+    Model = "Decision Tree",
+    TP = conf_table_dt[2, 2], # True Positives
+    FN = conf_table_dt[1, 2], # False Negatives
+    FP = conf_table_dt[2, 1], # False Positives
+    TN = conf_table_dt[1, 1]  # True Negatives
+)
+
+```
+
+
+## XGBoost
+Step 1
+```{r message=FALSE,  warning=FALSE, cache=TRUE}
+# This tells caret how to handle the training process, including the sampling
+smote_control <- trainControl(
+    method = "cv",
+    number = 10,
+    classProbs = TRUE,                 # Required for SMOTE
+    summaryFunction = twoClassSummary, # Use metrics better suited for imbalance
+    sampling = "smote"                 # This enables SMOTE
+)
+
+# Measure training time
+start_time_xg <- Sys.time()
+
+XG_clf_fit_hn <- train(
+    x_train_imputed,
+    y_train_factor, 
+    method = "xgbTree",
+    trControl = smote_control, # <-- Use the control object with SMOTE
+    metric = "ROC", # <-- Optimize for a better metric
+    preProc = c("center", "scale")
+)
+
+end_time_xg <- Sys.time()
+
+# Print elapsed time
+elapsed_time_xg <- end_time_xg - start_time_xg
+print(paste("Total training time:", round(elapsed_time_xg, 2)))
+```
+
+Step 2
+```{r }
+# print the final model
+XG_clf_fit_hn$finalModel
+```
+
+Step 3 
+```{r }
+# Predict on test data
+XG_clf_predict_hn <- predict(XG_clf_fit_hn,x_test)
+```
+
+Step 4: XGBoost Confusion matrix
+```{r }
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(XG_clf_predict_hn, y_test_factor, positive = "X1" )
+
+
+cm_xg <- confusionMatrix(XG_clf_predict_hn, y_test_factor, positive = "X1" )
+
+overall_metrics_xg <- cm_xg[["overall"]]
+class_metrics_xg   <- cm_xg[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <- list(
+    Model = "XGBoost",
+    Accuracy = round(overall_metrics_xg[["Accuracy"]], 3),
+    Precision = round(class_metrics_xg[["Precision"]], 3),
+    Recall = round(class_metrics_xg[["Recall"]], 3),
+    F1 = round(class_metrics_xg[["F1"]], 3)
+)
+
+# Extract the confusion matrix table
+conf_table_xg <- cm_xg[["table"]]
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <- list(
+    Model = "XGBoost",
+    TP = conf_table_xg[2, 2], # True Positives
+    FN = conf_table_xg[1, 2], # False Negatives
+    FP = conf_table_xg[2, 1], # False Positives
+    TN = conf_table_xg[1, 1]  # True Negatives
+)
+
+```
+
+
+## Neural Network
+Step 1
+```{r  cache=TRUE, Emessage=FALSE}
+smote_control <- trainControl(
+    method = "cv",
+    number = 10,
+    classProbs = TRUE,                 # Required for SMOTE
+    summaryFunction = twoClassSummary, # Use metrics better suited for imbalance
+    sampling = "smote"                 # This enables SMOTE
+)
+
+# Try different combinations of parameters like decay (prevents the weights from growing too large,) and size of Hidden layers
+my.grid <- expand.grid(.decay = c(0.1, 0.01), .size = c(5, 7, 9))
+
+# Measure training time
+start_time_nn <- Sys.time()
+
+# stepmax is maximum steps for the training of the neural network
+# threshold is set to 0.01, meaning that if the change in error during an iteration is 
+# less than 1%, then no further optimization will be carried out by the model
+nn_clf_fit <- train(
+    x_train_imputed,
+    y_train_factor,
+    method = "nnet",
+    trControl = smote_control, # <-- Use the control object with SMOTE
+    tuneGrid = my.grid,
+    metric = "ROC", # <-- Optimize for a better metric
+    trace = FALSE,
+    linout = 0,
+    stepmax = 100,
+    threshold = 0.01
+  )
+
+print(nn_clf_fit)
+
+end_time_nn <- Sys.time()
+
+# Print elapsed time
+elapsed_time_nn <- end_time_nn - start_time_nn
+print(paste("Total training time:", round(elapsed_time_nn, 2)))
+
+# Plot Neural Network 
+plotnet(nn_clf_fit$finalModel, 
+        y_names = "Premium Adopter",
+        max_sp = 1,
+        circle_cex = 2.5,
+        cex_val = 0.6)
+
+```
+
+Step 2
+```{r }
+# Predict on test data
+nn_clf_predict <- predict(nn_clf_fit,x_test_imputed)
+```
+
+Step 3: Confusion matrix
+```{r }
+# Print Confusion matrix, Accuracy, Sensitivity etc 
+confusionMatrix(nn_clf_predict, y_test_factor, positive = "X1")
+
+
+cm_nn <- confusionMatrix(nn_clf_predict, y_test_factor, positive = "X1")
+
+# save results to df
+overall_metrics_nn <- cm_nn[["overall"]]
+class_metrics_nn   <- cm_nn[["byClass"]]
+
+clf_results[nrow(clf_results) + 1,] <- list(
+    Model = "Neural Net",
+    Accuracy = round(overall_metrics_nn[["Accuracy"]], 3),
+    Precision = round(class_metrics_nn[["Precision"]], 3),
+    Recall = round(class_metrics_nn[["Recall"]], 3),
+    F1 = round(class_metrics_nn[["F1"]], 3)
+)
+
+# Extract the confusion matrix table
+conf_table_nn <- cm_nn[["table"]]
+
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <- list(
+    Model = "Neural Net",
+    TP = conf_table_nn[2, 2], # True Positives
+    FN = conf_table_nn[1, 2], # False Negatives
+    FP = conf_table_nn[2, 1], # False Positives
+    TN = conf_table_nn[1, 1]  # True Negatives
+)
+```
+
+
+## Random Forest  
+Step 1: create the model
+```{r cache=TRUE}
+smote_control_rf <- trainControl(
+    method = "cv",
+    number = 10,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    sampling = "smote"
+)
+
+rf_param_grid <- expand.grid(mtry = c(2, 5, 10))
+
+# Measure training time
+start_time_rf <- Sys.time()
+
+rf_fit_smote <- train(
+    x = x_train_imputed,
+    y = y_train_factor,
+    method = "rf",
+    metric = "ROC",
+    trControl = smote_control_rf,
+    tuneGrid = rf_param_grid,
+)
+
+end_time_rf <- Sys.time()
+
+# Print elapsed time
+elapsed_time_rf <- end_time_rf - start_time_rf
+print(paste("Total training time:", round(elapsed_time_rf, 2)))
+
+print(rf_fit_smote)
+```
+
+Step 2: Predict on the test data
+```{r}
+# Predict on the test data
+rf_predict <- predict(rf_fit_smote, newdata = x_test_imputed)
+```
+
+Step 3: Confusion Matrix 
+```{r}
+# Create the confusion matrix
+cm_rf <- confusionMatrix(rf_predict, y_test_factor, positive = "X1")
+print(cm_rf)
+
+# Extract metrics and add to your results dataframes
+overall_metrics_rf <- cm_rf[["overall"]]
+class_metrics_rf   <- cm_rf[["byClass"]]
+conf_table_rf      <- cm_rf[["table"]]
+
+# Add to clf_results
+clf_results[nrow(clf_results) + 1,] <- list(
+    Model = "Random Forest",
+    Accuracy = round(overall_metrics_rf[["Accuracy"]], 3),
+    Precision = round(class_metrics_rf[["Precision"]], 3),
+    Recall = round(class_metrics_rf[["Recall"]], 3),
+    F1 = round(class_metrics_rf[["F1"]], 3)
+)
+
+# Add to cost_benefit_df
+cost_benefit_df[nrow(cost_benefit_df) + 1,] <- list(
+    Model = "Random Forest",
+    TP = conf_table_rf[2, 2],
+    FN = conf_table_rf[1, 2],
+    FP = conf_table_rf[2, 1],
+    TN = conf_table_rf[1, 1]
+)
+```
+
+
+## Results 
+```{r}
+print(cost_benefit_df)
+print(clf_results)
+```
+## Based on the following models and their results, there are a few models that stand out to me. XGBoost has the highest accuracy of 93% but also has the lowest recall out of all the models, 6.5%. XGBoost is highly conservative and sorts most users as TN which causes the model to have the lowest TP count of 120. In other words, it fails to identify more users who would have converted. The purpose of this assignment/dataset is to identify the top 1000 users who are most likely to convert. XGBoost, while having the best accuracy, is not the best model at targeting users to convert.
+## I have chosen Random Forest as the best model. This is true because we have a business constraint on how many users we want to target, 1000. When generating a fixed list like this, the model's Precision is the most important metric because it tells us how "pure" the list of predicted converters is. The Random Forest model has a Precision of 28.4%, which is significantly better than any other model, including the next best, Logistic Regression (17.8%). This means the Random Forest will predict users who are more likely to convert. While other models like the Neural Net have higher recall, the goal is to find the best top 1000, and the Random Forest model does that the best due to its high precision. 
+
+## Top 1000 users to target with the free-trial 
+```{r}
+# Define final model 
+final_model <- rf_fit_smote
+
+
+#Impute the highnote df 
+highnote_df_imputed <- predict(impute_model, highnote_df)
+
+# Predict the probability for the positive class ("X1" or "adopter")
+# The 'type = "prob"' argument is essential here.
+predictions_full <- predict(final_model, newdata = highnote_df_imputed, type = "prob")
+
+# Add the prediction probabilities as a new column to your original data
+results_df <- highnote_df
+# We select the second column of the prediction output, which is the probability of class "X1"
+results_df$conversion_probability <- predictions_full$X1
+
+# Filter for current free users, sort by probability, and select the top 1000
+top_1000_target_list <- results_df %>%
+  filter(adopter == 0) %>% # Only target current FREE users
+  arrange(desc(conversion_probability)) %>% # Sort by probability, highest first
+  head(1000) %>% # Select the top 1000 rows
+  select(net_user, conversion_probability) # Keep only the user ID and their probability
+
+print(top_1000_target_list)
+```
+
+
